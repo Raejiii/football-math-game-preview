@@ -9,6 +9,13 @@ import { gameConfig } from '../config/game-config'
 const QUESTION_COUNT = 10
 const ANIMATION_DURATION = 800 // ms
 
+// Goal positions for horizontal distribution (distance-based)
+const GOAL_POSITIONS = [
+  { x: 40, y: 50 }, // Close
+  { x: 65, y: 50 }, // Mid
+  { x: 90, y: 50 }  // Far
+]
+
 type GameState = 'menu' | 'playing' | 'finished'
 
 interface Question {
@@ -24,10 +31,16 @@ export default function SoccerMathGame() {
   const [questionIndex, setQuestionIndex] = useState(0)
   const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null)
   const [isMuted, setIsMuted] = useState(false)
-  const [ballPosition, setBallPosition] = useState({ x: 20, y: 50 }) // Percentages
+  const [ballPosition, setBallPosition] = useState({ x: 12, y: 58 }) // Percentages - Next to feet
   const [isKicking, setIsKicking] = useState(false)
+  const [kickerFrame, setKickerFrame] = useState(1) // 1: Idle, 2: Windup/Contact, 3: Follow-through
   const [feedback, setFeedback] = useState<'correct' | 'incorrect' | null>(null)
   const [showKicker, setShowKicker] = useState(true)
+  
+  // Kicking Power States
+  const [kickPower, setKickPower] = useState(0) // 0-100
+  const [isCharging, setIsCharging] = useState(false)
+  const chargeIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
   // UI States from PoolGame
   const [showSidebar, setShowSidebar] = useState(false)
@@ -83,8 +96,59 @@ export default function SoccerMathGame() {
     
     return () => {
       stopAllAudio()
+      if (chargeIntervalRef.current) clearInterval(chargeIntervalRef.current)
     }
   }, [])
+
+  // Spacebar Handling
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !e.repeat && !isKicking && !isPaused && gameState === 'playing') {
+        setIsCharging(true)
+        setKickPower(0)
+        // Start charging
+        if (chargeIntervalRef.current) clearInterval(chargeIntervalRef.current)
+        chargeIntervalRef.current = setInterval(() => {
+          setKickPower(prev => {
+            if (prev >= 100) return 100
+            return prev + 2 // Fill speed
+          })
+        }, 20)
+      }
+    }
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !isKicking && !isPaused && gameState === 'playing') {
+        setIsCharging(false)
+        if (chargeIntervalRef.current) {
+          clearInterval(chargeIntervalRef.current)
+          chargeIntervalRef.current = null
+        }
+        
+        // Calculate target index based on power
+        // < 33% -> Index 0 (Close)
+        // 33-66% -> Index 1 (Mid)
+        // > 66% -> Index 2 (Far)
+        let targetIndex = 0
+        if (kickPower > 66) targetIndex = 2
+        else if (kickPower > 33) targetIndex = 1
+        
+        // Find the answer at this index
+        if (currentQuestion && currentQuestion.options[targetIndex] !== undefined) {
+            handleAnswer(currentQuestion.options[targetIndex], targetIndex)
+        }
+        setKickPower(0)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+    }
+  }, [isKicking, isPaused, gameState, currentQuestion, kickPower])
 
   // Background music management
   useEffect(() => {
@@ -161,8 +225,9 @@ export default function SoccerMathGame() {
     setElapsedSeconds(0)
     setFeedback(null)
     setIsKicking(false)
+    setKickerFrame(1)
     setShowKicker(true)
-    setBallPosition({ x: 20, y: 50 })
+    setBallPosition({ x: 12, y: 58 })
     generateQuestion()
     setIsPaused(false)
     setShowSidebar(false)
@@ -192,9 +257,10 @@ export default function SoccerMathGame() {
     })
     
     // Reset ball and feedback
-    setBallPosition({ x: 20, y: 50 })
+    setBallPosition({ x: 12, y: 58 })
     setFeedback(null)
     setIsKicking(false)
+    setKickerFrame(1)
     setShowKicker(true)
   }
 
@@ -203,16 +269,53 @@ export default function SoccerMathGame() {
 
     setIsKicking(true)
     playAudio("uiClick")
-
-    // Horizontal target calculation
-    // Target X is fixed near the right goal (approx 85-90%)
-    // Target Y varies based on the option index to hit different parts of the goal
-    const targetX = 90 
-    const targetY = 25 + (index * 25) // Spreads options vertically: 25%, 50%, 75%
-
-    setBallPosition({ x: targetX, y: targetY })
+    
+    // Start Kick Animation Sequence
+    // Frame 1 (Idle) -> Frame 2 (Contact) -> Frame 3 (Follow through)
+    setKickerFrame(2)
     
     setTimeout(() => {
+      setKickerFrame(3)
+      startBallAnimation(selectedAnswer, index)
+    }, 100)
+  }
+
+  const startBallAnimation = (selectedAnswer: number, index: number) => {
+    // Target based on the goal position
+    const target = GOAL_POSITIONS[index % GOAL_POSITIONS.length]
+    
+    // Start Animation Loop
+    const startTime = performance.now()
+    const startPos = { x: 12, y: 58 }
+    // Control point for curve: "Vertical" arc (up towards top of screen)
+    // Start (12,58) -> End (TargetX, 50)
+    // Mid Point X = (12 + TargetX) / 2
+    // Mid Point Y = 10 (High arc towards top of screen)
+    const controlPos = { x: (startPos.x + target.x) / 2, y: 10 }
+    
+    const animateBall = (currentTime: number) => {
+        const elapsed = currentTime - startTime
+        const progress = Math.min(elapsed / ANIMATION_DURATION, 1)
+        
+        // Quadratic Bezier Curve: B(t) = (1-t)^2 P0 + 2(1-t)t P1 + t^2 P2
+        const t = progress
+        const x = Math.pow(1 - t, 2) * startPos.x + 2 * (1 - t) * t * controlPos.x + Math.pow(t, 2) * target.x
+        const y = Math.pow(1 - t, 2) * startPos.y + 2 * (1 - t) * t * controlPos.y + Math.pow(t, 2) * target.y
+        
+        setBallPosition({ x, y })
+        
+        if (progress < 1) {
+            requestAnimationFrame(animateBall)
+        } else {
+            // Animation Complete
+            finishKick(selectedAnswer)
+        }
+    }
+    
+    requestAnimationFrame(animateBall)
+  }
+  
+  const finishKick = (selectedAnswer: number) => {
       const isCorrect = selectedAnswer === currentQuestion?.answer
       
       if (isCorrect) {
@@ -238,7 +341,6 @@ export default function SoccerMathGame() {
           setIsPaused(true)
         }
       }, 1500)
-    }, ANIMATION_DURATION)
   }
 
   const startGame = () => {
@@ -252,25 +354,14 @@ export default function SoccerMathGame() {
   }
 
   return (
-    <div className="relative w-full h-full bg-green-600 overflow-hidden select-none font-sans">
-      {/* Background Elements - Horizontal Field */}
-      <div className="absolute inset-0 pointer-events-none">
-        {/* Center Line (Vertical) */}
-        <div className="absolute top-0 left-1/2 transform -translate-x-1/2 w-1 h-full bg-white/50" />
-        
-        {/* Center Circle */}
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-[20vw] h-[20vw] border-4 border-white/50 rounded-full" />
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-white/50 rounded-full" />
-        
-        {/* Right Goal Area (Answers) */}
-        <div className="absolute top-1/2 right-0 transform -translate-y-1/2 w-[15%] h-[60%] border-4 border-r-0 border-white/50 bg-black/10 rounded-l-xl">
-           <div className="absolute inset-0 opacity-20" 
-               style={{ backgroundImage: 'linear-gradient(45deg, #fff 25%, transparent 25%, transparent 75%, #fff 75%, #fff), linear-gradient(45deg, #fff 25%, transparent 25%, transparent 75%, #fff 75%, #fff)', backgroundSize: '20px 20px', backgroundPosition: '0 0, 10px 10px' }}>
-           </div>
-        </div>
-        
-        {/* Left Penalty Area (Player Start) */}
-        <div className="absolute top-1/2 left-0 transform -translate-y-1/2 w-[15%] h-[60%] border-4 border-l-0 border-white/50 rounded-r-xl" />
+    <div className="relative w-full h-full overflow-hidden select-none font-sans">
+      {/* Background Image */}
+      <div className="absolute inset-0 z-0">
+        <img 
+          src="/Desktop Spot kicker.svg" 
+          alt="Soccer Field Background" 
+          className="w-full h-full object-cover"
+        />
       </div>
 
       {/* --- NEW UI ELEMENTS --- */}
@@ -374,13 +465,41 @@ export default function SoccerMathGame() {
         <div className="text-xl font-black text-green-600" style={{ fontFamily: "Bubblegum Sans" }}>{score} / {QUESTION_COUNT}</div>
       </div>
 
+      {/* Power Bar */}
+      <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 w-64 md:w-96 z-50">
+        <div className="bg-black/50 p-2 rounded-full border-2 border-white/30 backdrop-blur-sm">
+           <div className="h-4 md:h-6 w-full bg-gray-700 rounded-full overflow-hidden relative">
+              {/* Power Segments Indicators */}
+              <div className="absolute top-0 left-[33%] h-full w-0.5 bg-white/30 z-10"></div>
+              <div className="absolute top-0 left-[66%] h-full w-0.5 bg-white/30 z-10"></div>
+              
+              {/* Fill */}
+              <div 
+                className={cn(
+                  "h-full transition-all duration-75 ease-linear",
+                  kickPower > 66 ? "bg-red-500" : kickPower > 33 ? "bg-yellow-400" : "bg-green-400"
+                )}
+                style={{ width: `${kickPower}%` }}
+              ></div>
+           </div>
+           <div className="flex justify-between text-white text-[10px] md:text-xs font-bold mt-1 px-1" style={{ fontFamily: "Nunito" }}>
+             <span>CLOSE</span>
+             <span>MID</span>
+             <span>FAR</span>
+           </div>
+        </div>
+        <div className="text-center text-white font-bold text-sm mt-2 animate-pulse drop-shadow-md">
+          HOLD SPACE TO KICK
+        </div>
+      </div>
+
       {/* Game Content */}
       {currentQuestion && (
         <>
           {/* Question Banner */}
-          <div className="absolute top-[15%] left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-40">
-            <div className="bg-white border-4 border-green-500 rounded-2xl px-6 py-3 md:px-8 md:py-4 shadow-xl transform rotate-[-2deg] hover:rotate-0 transition-transform">
-              <div className="text-3xl md:text-5xl font-black text-green-600 flex gap-4 items-center" style={{ fontFamily: "Bubblegum Sans" }}>
+          <div className="absolute top-[30%] left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-40">
+            <div className="bg-white border-4 border-green-500 rounded-2xl px-4 py-2 md:px-6 md:py-3 shadow-xl transform rotate-[-2deg] hover:rotate-0 transition-transform">
+              <div className="text-2xl md:text-4xl font-black text-green-600 flex gap-3 items-center" style={{ fontFamily: "Bubblegum Sans" }}>
                 <span>{currentQuestion.num1}</span>
                 <span>+</span>
                 <span>{currentQuestion.num2}</span>
@@ -390,44 +509,86 @@ export default function SoccerMathGame() {
             </div>
           </div>
 
-          {/* Goal Targets (Vertical Stack on Right) */}
-          <div className="absolute right-[5%] top-1/2 transform -translate-y-1/2 h-[70%] flex flex-col justify-around z-40">
-            {currentQuestion.options.map((opt, idx) => (
-              <button
+          {/* Goal Targets (Horizontal Distribution) */}
+          {currentQuestion.options.map((opt, idx) => {
+            const pos = GOAL_POSITIONS[idx % GOAL_POSITIONS.length]
+            // Highlight based on current power if charging
+            let isTargeted = false
+            if (isCharging) {
+                if (idx === 0 && kickPower <= 33) isTargeted = true
+                else if (idx === 1 && kickPower > 33 && kickPower <= 66) isTargeted = true
+                else if (idx === 2 && kickPower > 66) isTargeted = true
+            }
+
+            return (
+              <div
                 key={idx}
-                onClick={() => handleAnswer(opt, idx)}
-                disabled={isKicking || isPaused}
-                className="w-16 h-16 md:w-20 md:h-20 rounded-full bg-white border-4 border-green-500 flex items-center justify-center shadow-lg hover:scale-110 active:scale-95 transition-all cursor-pointer group"
+                className="absolute z-40 w-32 h-24 md:w-40 md:h-32 group transition-transform duration-100"
+                style={{ 
+                  left: `${pos.x}%`, 
+                  top: `${pos.y}%`,
+                  transform: isTargeted ? 'translate(-50%, -50%) scale(1.1)' : 'translate(-50%, -50%) scale(1)'
+                }}
               >
-                <span className="text-xl md:text-2xl font-bold text-green-700 group-hover:text-green-900" style={{ fontFamily: "Bubblegum Sans" }}>{opt}</span>
-              </button>
-            ))}
-          </div>
+                 {/* Goal Post Structure */}
+                 <div className="absolute inset-0 flex items-center justify-center">
+                    <img 
+                      src="/Group 26086646.svg" 
+                      alt="Goal" 
+                      className={cn(
+                        "w-full h-full object-contain drop-shadow-md transition-all duration-100",
+                        isTargeted ? "drop-shadow-[0_0_15px_rgba(250,204,21,0.8)] brightness-110" : ""
+                      )}
+                    />
+                    
+                    {/* Answer Number with Ellipse Background */}
+                    <div className="absolute z-10 mt-16 md:mt-20 flex items-center justify-center w-10 h-10 md:w-14 md:h-14">
+                       <img 
+                         src="/Ellipse 1058.svg" 
+                         alt="bg" 
+                         className="absolute inset-0 w-full h-full"
+                       />
+                       <span className="relative z-20 text-xl md:text-2xl font-bold text-red-600" style={{ fontFamily: "Bubblegum Sans" }}>
+                         {opt}
+                       </span>
+                    </div>
+                 </div>
+              </div>
+            )
+          })}
 
           {/* Player (Kicker) - Left Side */}
-          <div className="absolute left-[5%] top-1/2 transform -translate-y-1/2 w-24 md:w-32 z-20 transition-opacity duration-300" style={{ opacity: showKicker ? 1 : 0.5 }}>
-             <img src="/spot-kicker.png" alt="Kicker" className="w-full h-auto object-contain transform scale-x-[-1]" /> {/* Flipped to face right if original faces left, check image */}
+          <div className="absolute left-[5%] top-1/2 transform -translate-y-1/2 h-24 md:h-32 z-20 transition-opacity duration-300" style={{ opacity: showKicker ? 1 : 0.5 }}>
+             <img 
+               src={
+                 kickerFrame === 2 ? "/Property%201=2.svg" : 
+                 kickerFrame === 3 ? "/Property%201=3.svg" : 
+                 "/boy.svg"
+               } 
+               alt="Kicker" 
+               className="h-full w-auto object-contain" 
+             />
           </div>
 
           {/* Ball */}
           <div 
-            className="absolute w-10 h-10 md:w-14 md:h-14 z-30 transition-all ease-out"
+            className="absolute w-10 h-10 md:w-14 md:h-14 z-30"
             style={{ 
               left: `${ballPosition.x}%`, 
               top: `${ballPosition.y}%`,
               transform: 'translate(-50%, -50%)',
-              transitionDuration: isKicking ? `${ANIMATION_DURATION}ms` : '300ms'
+              // Remove transition during kick to allow smooth JS animation
+              transition: isKicking ? 'none' : 'all 300ms ease-out'
             }}
           >
-            <div className={cn(
-              "w-full h-full rounded-full bg-white shadow-lg relative overflow-hidden border-2 border-gray-300",
-              isKicking && "animate-spin"
-            )}>
-               <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_30%,_white,_#ddd)]"></div>
-               <div className="absolute top-1/4 left-1/4 w-1/2 h-1/2 bg-black rounded-full opacity-80"></div>
-               <div className="absolute -top-2 left-1/2 w-4 h-4 bg-black rounded-full opacity-80"></div>
-               <div className="absolute top-1/2 -left-2 w-4 h-4 bg-black rounded-full opacity-80"></div>
-            </div>
+            <img 
+              src="/ball.svg" 
+              alt="Soccer Ball" 
+              className={cn(
+                "w-full h-full object-contain drop-shadow-lg",
+                isKicking && "animate-spin"
+              )} 
+            />
           </div>
 
           {/* Feedback Overlay */}
@@ -459,15 +620,15 @@ export default function SoccerMathGame() {
             <div className="space-y-4 text-lg font-medium text-gray-700" style={{ fontFamily: "Nunito" }}>
               <div className="flex items-center gap-3">
                 <div className="w-8 h-8 rounded-full bg-green-100 flex items-center justify-center text-green-600 font-bold">1</div>
-                <p>Solve the math problem.</p>
+                <p>Solve the math problem to identify the correct goal answer.</p>
               </div>
               <div className="flex items-center gap-3">
                 <div className="w-8 h-8 rounded-full bg-green-100 flex items-center justify-center text-green-600 font-bold">2</div>
-                <p>Click the correct answer in the goal.</p>
+                <p>Hold the Spacebar to charge your kick power (green=close, yellow=mid, red=far).</p>
               </div>
               <div className="flex items-center gap-3">
                 <div className="w-8 h-8 rounded-full bg-green-100 flex items-center justify-center text-green-600 font-bold">3</div>
-                <p>Score as many goals as you can!</p>
+                <p>Release the Spacebar to kick the ball to the targeted goal and score points!</p>
               </div>
             </div>
             <div className="mt-8 flex items-center justify-center">
