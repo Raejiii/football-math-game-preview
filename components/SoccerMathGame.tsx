@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import confetti from 'canvas-confetti'
-import { Volume2, VolumeX, Play, RotateCcw, HelpCircle, X, Pause, Music } from 'lucide-react'
-import { Button } from './ui/button'
+import { VolumeX, Play, RotateCcw, HelpCircle, X, Pause, Music } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { gameConfig } from '../config/game-config'
 
@@ -497,7 +496,7 @@ export default function SoccerMathGame() {
       {currentQuestion && (
         <>
           {/* Question Banner */}
-          <div className="absolute top-[30%] left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-40">
+          <div className="absolute top-[28%] left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-40">
             <div className="bg-white border-4 border-green-500 rounded-2xl px-4 py-2 md:px-6 md:py-3 shadow-xl transform rotate-[-2deg] hover:rotate-0 transition-transform">
               <div className="text-2xl md:text-4xl font-black text-green-600 flex gap-3 items-center" style={{ fontFamily: "Bubblegum Sans" }}>
                 <span>{currentQuestion.num1}</span>
