@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useLayoutEffect } from 'react'
 import confetti from 'canvas-confetti'
 import { VolumeX, Play, RotateCcw, HelpCircle, X, Pause, Music } from 'lucide-react'
 import { cn } from '../lib/utils'
@@ -36,8 +36,10 @@ export default function SoccerMathGame() {
   const [feedback, setFeedback] = useState<'correct' | 'incorrect' | null>(null)
   const [showKicker, setShowKicker] = useState(true)
   
-  // Kicking Power States
-  const [kickPower, setKickPower] = useState(0) // 0-100
+  // Kicking Power States - using Ref for performance to avoid re-renders
+  const kickPowerRef = useRef(0)
+  const powerBarFillRef = useRef<HTMLDivElement>(null)
+  const [activeTargetIndex, setActiveTargetIndex] = useState<number>(0)
   const [isCharging, setIsCharging] = useState(false)
   const chargeIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
@@ -49,6 +51,7 @@ export default function SoccerMathGame() {
   
   // Audio refs
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({})
+  const ballRef = useRef<HTMLDivElement>(null)
 
   const playAudio = (name: string, loop: boolean = false): void => {
     if (!isMuted) {
@@ -104,15 +107,51 @@ export default function SoccerMathGame() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Space' && !e.repeat && !isKicking && !isPaused && gameState === 'playing') {
         setIsCharging(true)
-        setKickPower(0)
+        kickPowerRef.current = 0
+        setActiveTargetIndex(0)
+        
+        // Reset visual bar
+        if (powerBarFillRef.current) {
+            powerBarFillRef.current.style.width = '0%'
+            powerBarFillRef.current.className = "h-full transition-all duration-75 ease-linear bg-green-400"
+        }
+
         // Start charging
         if (chargeIntervalRef.current) clearInterval(chargeIntervalRef.current)
         chargeIntervalRef.current = setInterval(() => {
-          setKickPower(prev => {
-            if (prev >= 100) return 100
-            return prev + 2 // Fill speed
+          if (kickPowerRef.current < 100) {
+            kickPowerRef.current += 4
+          } else {
+            kickPowerRef.current = 100
+          }
+          
+          const currentPower = kickPowerRef.current
+          
+          // Update visual bar directly
+          if (powerBarFillRef.current) {
+            powerBarFillRef.current.style.width = `${currentPower}%`
+            
+            // Update color based on thresholds
+            if (currentPower > 66) {
+                powerBarFillRef.current.className = "h-full transition-all duration-75 ease-linear bg-red-500"
+            } else if (currentPower > 33) {
+                powerBarFillRef.current.className = "h-full transition-all duration-75 ease-linear bg-yellow-400"
+            } else {
+                powerBarFillRef.current.className = "h-full transition-all duration-75 ease-linear bg-green-400"
+            }
+          }
+
+          // Update target index state (only triggers render when value changes)
+          let newTargetIndex = 0
+          if (currentPower > 66) newTargetIndex = 2
+          else if (currentPower > 33) newTargetIndex = 1
+          
+          setActiveTargetIndex(prev => {
+              if (prev !== newTargetIndex) return newTargetIndex
+              return prev
           })
-        }, 20)
+
+        }, 40)
       }
     }
 
@@ -124,19 +163,21 @@ export default function SoccerMathGame() {
           chargeIntervalRef.current = null
         }
         
-        // Calculate target index based on power
-        // < 33% -> Index 0 (Close)
-        // 33-66% -> Index 1 (Mid)
-        // > 66% -> Index 2 (Far)
+        // Use the ref value
+        const power = kickPowerRef.current
+        
         let targetIndex = 0
-        if (kickPower > 66) targetIndex = 2
-        else if (kickPower > 33) targetIndex = 1
+        if (power > 66) targetIndex = 2
+        else if (power > 33) targetIndex = 1
         
         // Find the answer at this index
         if (currentQuestion && currentQuestion.options[targetIndex] !== undefined) {
             handleAnswer(currentQuestion.options[targetIndex], targetIndex)
         }
-        setKickPower(0)
+        kickPowerRef.current = 0
+        if (powerBarFillRef.current) {
+            powerBarFillRef.current.style.width = '0%'
+        }
       }
     }
 
@@ -147,7 +188,7 @@ export default function SoccerMathGame() {
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
     }
-  }, [isKicking, isPaused, gameState, currentQuestion, kickPower])
+  }, [isKicking, isPaused, gameState, currentQuestion]) // Removed kickPower dependency
 
   // Background music management
   useEffect(() => {
@@ -230,6 +271,10 @@ export default function SoccerMathGame() {
     generateQuestion()
     setIsPaused(false)
     setShowSidebar(false)
+    kickPowerRef.current = 0
+    if (powerBarFillRef.current) {
+        powerBarFillRef.current.style.width = '0%'
+    }
   }
 
   const generateQuestion = () => {
@@ -262,6 +307,14 @@ export default function SoccerMathGame() {
     setKickerFrame(1)
     setShowKicker(true)
   }
+
+  // Ensure ball position is maintained when switching to kicking state
+  useLayoutEffect(() => {
+    if (isKicking && ballRef.current) {
+      ballRef.current.style.left = `${ballPosition.x}%`
+      ballRef.current.style.top = `${ballPosition.y}%`
+    }
+  }, [isKicking, ballPosition])
 
   const handleAnswer = (selectedAnswer: number, index: number) => {
     if (isKicking || isPaused || gameState !== 'playing') return
@@ -296,12 +349,16 @@ export default function SoccerMathGame() {
         const elapsed = currentTime - startTime
         const progress = Math.min(elapsed / ANIMATION_DURATION, 1)
         
-        // Quadratic Bezier Curve: B(t) = (1-t)^2 P0 + 2(1-t)t P1 + t^2 P2
+        // Quadratic Bezier Curve
         const t = progress
         const x = Math.pow(1 - t, 2) * startPos.x + 2 * (1 - t) * t * controlPos.x + Math.pow(t, 2) * target.x
         const y = Math.pow(1 - t, 2) * startPos.y + 2 * (1 - t) * t * controlPos.y + Math.pow(t, 2) * target.y
         
-        setBallPosition({ x, y })
+        // Direct DOM update for performance
+        if (ballRef.current) {
+            ballRef.current.style.left = `${x}%`
+            ballRef.current.style.top = `${y}%`
+        }
         
         if (progress < 1) {
             requestAnimationFrame(animateBall)
@@ -474,11 +531,9 @@ export default function SoccerMathGame() {
               
               {/* Fill */}
               <div 
-                className={cn(
-                  "h-full transition-all duration-75 ease-linear",
-                  kickPower > 66 ? "bg-red-500" : kickPower > 33 ? "bg-yellow-400" : "bg-green-400"
-                )}
-                style={{ width: `${kickPower}%` }}
+                ref={powerBarFillRef}
+                className="h-full transition-all duration-75 ease-linear bg-green-400"
+                style={{ width: '0%' }}
               ></div>
            </div>
            <div className="flex justify-between text-white text-[10px] md:text-xs font-bold mt-1 px-1" style={{ fontFamily: "Nunito" }}>
@@ -514,9 +569,7 @@ export default function SoccerMathGame() {
             // Highlight based on current power if charging
             let isTargeted = false
             if (isCharging) {
-                if (idx === 0 && kickPower <= 33) isTargeted = true
-                else if (idx === 1 && kickPower > 33 && kickPower <= 66) isTargeted = true
-                else if (idx === 2 && kickPower > 66) isTargeted = true
+                if (idx === activeTargetIndex) isTargeted = true
             }
 
             return (
@@ -571,10 +624,11 @@ export default function SoccerMathGame() {
 
           {/* Ball */}
           <div 
+            ref={ballRef}
             className="absolute w-10 h-10 md:w-14 md:h-14 z-30"
             style={{ 
-              left: `${ballPosition.x}%`, 
-              top: `${ballPosition.y}%`,
+              left: isKicking ? undefined : `${ballPosition.x}%`,
+              top: isKicking ? undefined : `${ballPosition.y}%`,
               transform: 'translate(-50%, -50%)',
               // Remove transition during kick to allow smooth JS animation
               transition: isKicking ? 'none' : 'all 300ms ease-out'
